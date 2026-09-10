@@ -9,7 +9,7 @@ export async function POST() {
   // 사용자가 직접 고르게 한다 (아이디 입력 없는 "디스커버러블" 로그인 방식).
   const options = await generateAuthenticationOptions({
     rpID,
-    userVerification: 'preferred',
+    userVerification: 'required',
   });
 
   const challengeRecord = await createChallenge('login', options.challenge);

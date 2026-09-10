@@ -51,7 +51,7 @@ export async function POST(req: NextRequest) {
     })),
     authenticatorSelection: {
       residentKey: 'required',
-      userVerification: 'preferred',
+      userVerification: 'required',
     },
   });
 
