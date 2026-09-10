@@ -9,3 +9,5 @@ devserver.log
 
 .vercel
 .env*
+evidence-output.md
+evidence-run.log
