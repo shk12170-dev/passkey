@@ -126,6 +126,45 @@ async function main() {
   );
   check('10. 마지막 남은 패스키는 삭제가 거부됨 (400)', del2.status === 400);
 
+  // 삭제된 패스키(firstId)로 로그인 시도 -> 401로 거절되어야 함
+  const deletedLogin = await page.evaluate(async (deletedId) => {
+    const optRes = await fetch('/api/login/options', { method: 'POST' });
+    if (!optRes.ok) return { step: 'options', status: optRes.status };
+    const verifyRes = await fetch('/api/login/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ response: { id: deletedId } }),
+    });
+    return { step: 'verify', status: verifyRes.status };
+  }, firstId);
+  check(
+    '10-1. 삭제된 패스키로 로그인 시도는 거절됨 (401)',
+    deletedLogin.step === 'verify' && deletedLogin.status === 401,
+  );
+
+  // 같은 challenge(로그인 시도)를 두 번 소비하려 하면 두 번째는 거절되어야 함
+  const challengeReuse = await page.evaluate(async () => {
+    const optRes = await fetch('/api/login/options', { method: 'POST' });
+    if (!optRes.ok) return { step: 'options', status: optRes.status };
+    const body = JSON.stringify({ response: { id: 'no-such-credential' } });
+    const first = await fetch('/api/login/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    // 같은 pending_attempt 쿠키로 다시 시도 (challenge 재사용 공격 시뮬레이션)
+    const second = await fetch('/api/login/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    return { firstStatus: first.status, secondStatus: second.status };
+  });
+  check(
+    '10-2. 이미 소비된 challenge를 재사용하면 거절됨 (두 번째 요청 400)',
+    challengeReuse.secondStatus === 400,
+  );
+
   // CSRF 토큰 없이 로그아웃 시도 -> 거부
   const logoutNoCsrf = await page.evaluate(async () => {
     const r = await fetch('/api/logout', { method: 'POST' });
