@@ -1,8 +1,9 @@
 // 가상 WebAuthn 인증장치로 패스키 등록/로그인 전체 흐름을 사람 개입 없이 검증하는 스크립트.
 // 실행 전에 `npm run dev` 로 개발 서버가 http://localhost:3000 에 떠 있어야 한다.
+// BASE_URL 환경변수로 배포된 주소를 대상으로 테스트할 수도 있다.
 import { chromium } from 'playwright';
 
-const BASE_URL = 'http://localhost:3000';
+const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
 const results = [];
 
 function check(name, condition) {
