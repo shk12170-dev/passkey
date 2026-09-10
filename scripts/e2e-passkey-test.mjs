@@ -200,6 +200,56 @@ async function main() {
   check('15. 재로그인 후에도 같은 계정 정보(이름)가 표시됨', bodyText.includes(`${name}님`));
   check('16. 재로그인 후 패스키 목록은 1개(삭제 반영됨)', bodyText.includes('등록된 패스키 (1개)'));
 
+  const user1RemainingPasskeyId = secondId; // 위에서 살아남은, user1 소유의 credential id
+
+  // 완전히 다른 두 번째 계정을 만들어 "양방향 타 계정 조회 거절"을 검증한다.
+  const context2 = await browser.newContext();
+  const page2 = await context2.newPage();
+  page2.on('dialog', async (dialog) => {
+    await dialog.accept(dialog.defaultValue() || '두번째 사용자 기기');
+  });
+  const cdp2 = await context2.newCDPSession(page2);
+  await cdp2.send('WebAuthn.enable');
+  const { authenticatorId: authenticatorId2 } = await cdp2.send('WebAuthn.addVirtualAuthenticator', {
+    options: virtualAuthenticatorOptions,
+  });
+
+  await page2.goto(`${BASE_URL}/my-space`);
+  await page2.waitForSelector('text=패스키로 시작하기');
+  await page2.fill('input[type="text"]', '다른사용자');
+  await page2.click('button:has-text("패스키 만들기")');
+  await page2.waitForSelector('text=패스키가 등록되었습니다.', { timeout: 15000 });
+
+  const me2 = await page2.evaluate(async () => {
+    const r = await fetch('/api/me');
+    return r.json();
+  });
+  check(
+    '17. 다른 계정으로 로그인하면 그 계정 자신의 데이터만 보임 (첫 번째 계정 패스키 미포함)',
+    me2.displayName === '다른사용자' &&
+      !me2.passkeys.some((p) => p.id === user1RemainingPasskeyId),
+  );
+
+  // user2가 user1 소유의 credential id를 삭제 시도 -> 자기 소유 목록에 없으므로 404
+  const crossAccountDelete = await page2.evaluate(
+    async ({ id, csrf }) => {
+      const r = await fetch('/api/passkeys/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+        body: JSON.stringify({ credentialId: id }),
+      });
+      return r.status;
+    },
+    { id: user1RemainingPasskeyId, csrf: me2.csrfToken },
+  );
+  check(
+    '18. 다른 계정 소유의 패스키는 삭제/조회 시도 시 거절됨 (404)',
+    crossAccountDelete === 404,
+  );
+
+  await cdp2.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId: authenticatorId2 });
+  await context2.close();
+
   await cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId });
   await browser.close();
 
