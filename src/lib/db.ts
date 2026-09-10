@@ -1,7 +1,7 @@
 import path from 'node:path';
-import os from 'node:os';
 import fs from 'node:fs';
 import { JSONFilePreset } from 'lowdb/node';
+import { get, put, BlobNotFoundError } from '@vercel/blob';
 
 export type UserRecord = {
   id: string;
@@ -41,25 +41,69 @@ type DBSchema = {
   challenges: ChallengeRecord[];
 };
 
-// Vercel(서버리스) 환경은 배포된 코드 디렉터리가 읽기 전용이라
-// process.cwd() 밑에는 쓸 수 없다. 그런 환경에서는 쓰기 가능한 /tmp 를 대신 사용한다.
-// (다만 /tmp도 임시 저장소라 인스턴스가 재시작되면 데이터가 초기화될 수 있다.)
-const dataDir = process.env.VERCEL
-  ? path.join(os.tmpdir(), 't08-passkey-data')
-  : path.join(process.cwd(), 'data');
-const dbFile = path.join(dataDir, 'db.json');
+function emptyData(): DBSchema {
+  return { users: [], passkeys: [], sessions: [], challenges: [] };
+}
 
-let dbPromise: ReturnType<typeof JSONFilePreset<DBSchema>> | null = null;
+export interface DB {
+  data: DBSchema;
+  read(): Promise<void>;
+  write(): Promise<void>;
+}
 
-export function getDB() {
-  if (!dbPromise) {
-    fs.mkdirSync(dataDir, { recursive: true });
-    dbPromise = JSONFilePreset<DBSchema>(dbFile, {
-      users: [],
-      passkeys: [],
-      sessions: [],
-      challenges: [],
+// Vercel(서버리스) 환경은 배포된 코드 디렉터리가 읽기 전용이라 로컬 파일에 쓸 수 없다.
+// 그곳에서는 Vercel Blob(별도로 만든 영구 저장소)을 대신 사용해서
+// 재배포/재시작과 무관하게 데이터가 계속 유지되게 한다.
+const BLOB_PATHNAME = 't08-passkey-db.json';
+const useBlob = Boolean(process.env.VERCEL && process.env.BLOB_READ_WRITE_TOKEN);
+
+class BlobDB implements DB {
+  data: DBSchema = emptyData();
+
+  async read() {
+    try {
+      const result = await get(BLOB_PATHNAME, { access: 'private', useCache: false });
+      if (result?.statusCode === 200) {
+        const text = await new Response(result.stream).text();
+        this.data = JSON.parse(text) as DBSchema;
+      }
+    } catch (err) {
+      if (err instanceof BlobNotFoundError) {
+        this.data = emptyData();
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  async write() {
+    await put(BLOB_PATHNAME, JSON.stringify(this.data), {
+      access: 'private',
+      addRandomSuffix: false,
+      allowOverwrite: true,
+      contentType: 'application/json',
     });
   }
-  return dbPromise;
+}
+
+let blobInstance: BlobDB | null = null;
+let filePromise: ReturnType<typeof JSONFilePreset<DBSchema>> | null = null;
+
+export async function getDB(): Promise<DB> {
+  if (useBlob) {
+    if (!blobInstance) {
+      blobInstance = new BlobDB();
+      await blobInstance.read();
+    }
+    // 서버리스 인스턴스마다 메모리가 분리되어 있으므로 매번 최신 상태로 새로고침한다.
+    await blobInstance.read();
+    return blobInstance;
+  }
+
+  if (!filePromise) {
+    const dataDir = path.join(process.cwd(), 'data');
+    fs.mkdirSync(dataDir, { recursive: true });
+    filePromise = JSONFilePreset<DBSchema>(path.join(dataDir, 'db.json'), emptyData());
+  }
+  return filePromise;
 }
