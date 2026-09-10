@@ -4,6 +4,11 @@
 Windows Hello, 휴대폰 지문/얼굴 인식, 보안 키 등으로 로그인하고, 로그인해야만 보이는
 비공개(합성) 자료 3건을 확인할 수 있습니다.
 
+## 배포 링크
+
+- 결과물: https://t08-passkey-portfolio-three.vercel.app
+- 소스 코드: https://github.com/shk12170-dev/t08-passkey-portfolio
+
 ## 1. 실행 방법
 
 ```bash
