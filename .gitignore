@@ -6,3 +6,6 @@ data/db.json
 .env.local
 npm-debug.log*
 devserver.log
+
+.vercel
+.env*

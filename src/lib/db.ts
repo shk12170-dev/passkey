@@ -1,4 +1,5 @@
 import path from 'node:path';
+import os from 'node:os';
 import fs from 'node:fs';
 import { JSONFilePreset } from 'lowdb/node';
 
@@ -40,7 +41,12 @@ type DBSchema = {
   challenges: ChallengeRecord[];
 };
 
-const dataDir = path.join(process.cwd(), 'data');
+// Vercel(서버리스) 환경은 배포된 코드 디렉터리가 읽기 전용이라
+// process.cwd() 밑에는 쓸 수 없다. 그런 환경에서는 쓰기 가능한 /tmp 를 대신 사용한다.
+// (다만 /tmp도 임시 저장소라 인스턴스가 재시작되면 데이터가 초기화될 수 있다.)
+const dataDir = process.env.VERCEL
+  ? path.join(os.tmpdir(), 't08-passkey-data')
+  : path.join(process.cwd(), 'data');
 const dbFile = path.join(dataDir, 'db.json');
 
 let dbPromise: ReturnType<typeof JSONFilePreset<DBSchema>> | null = null;
