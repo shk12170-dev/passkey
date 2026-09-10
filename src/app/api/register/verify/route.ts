@@ -32,11 +32,13 @@ export async function POST(req: NextRequest) {
       expectedOrigin: origin,
       expectedRPID: rpID,
     });
-  } catch {
+  } catch (err) {
+    console.error('[register/verify] verifyRegistrationResponse threw:', err);
     return NextResponse.json({ error: '패스키 등록 검증에 실패했습니다.' }, { status: 400 });
   }
 
   if (!verification.verified || !verification.registrationInfo) {
+    console.error('[register/verify] verification not verified:', verification);
     return NextResponse.json({ error: '패스키 등록 검증에 실패했습니다.' }, { status: 400 });
   }
 
