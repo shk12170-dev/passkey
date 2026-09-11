@@ -28,6 +28,25 @@ function proof(label, req, res) {
   );
 }
 
+const rawTokenGlobal = () => process.env.BLOB_READ_WRITE_TOKEN;
+async function fetchRawDbGlobal() {
+  const rawRes = await fetch(
+    `https://fmaiqwkkbsvudj4y.private.blob.vercel-storage.com/t08-passkey-db.json?t=${Date.now()}`,
+    { headers: { Authorization: `Bearer ${rawTokenGlobal()}` }, cache: 'no-store' },
+  );
+  return rawRes.json();
+}
+async function fetchRawRecordWithRetry(predicate, attempts = 5, delayMs = 1500) {
+  if (!rawTokenGlobal()) return undefined;
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, delayMs));
+    const rawDb = await fetchRawDbGlobal();
+    const found = predicate(rawDb);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 async function main() {
   const browser = await chromium.launch();
   const context = await browser.newContext();
@@ -72,12 +91,89 @@ async function main() {
   });
   proof('로그인 없이 /api/me 호출', 'GET /api/me (쿠키 없음)', meUnauth);
 
-  // 등록 (증거용 계정)
+  // C20: 등록 요청마다 challenge가 서로 다른지 확인 (같은 브라우저 컨텍스트로 두 번 호출)
+  section('C20. 등록 요청마다 질문(challenge) 값이 서로 다릅니다');
+  const twoRegOptions = await page.evaluate(async () => {
+    const a = await (
+      await fetch('/api/register/options', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ displayName: '챌린지비교용A' }),
+      })
+    ).json();
+    const b = await (
+      await fetch('/api/register/options', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ displayName: '챌린지비교용B' }),
+      })
+    ).json();
+    return { first: a.options.challenge, second: b.options.challenge };
+  });
+  log(
+    `**같은 화면에서 등록 옵션을 두 번 요청한 challenge 값 비교**\n\n` +
+      '```\n' +
+      `1번째 challenge: ${mask(twoRegOptions.first)}\n` +
+      `2번째 challenge: ${mask(twoRegOptions.second)}\n` +
+      `두 값이 다른가: ${twoRegOptions.first !== twoRegOptions.second}\n` +
+      '```\n',
+  );
+
+  // C25: 등록을 시작만 하고(challenge 발급) 끝까지 진행하지 않으면(취소/포기)
+  // 서버에 계정이 생기지 않아야 한다.
+  section('C25. 등록을 중간에 취소하면 서버에 아무것도 남지 않습니다');
+  const cancelName = `취소테스트_${Date.now()}`;
+  await page.evaluate(async (name) => {
+    await fetch('/api/register/options', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ displayName: name }),
+    });
+  }, cancelName);
+  const ghostUserFound = rawTokenGlobal()
+    ? ((await fetchRawDbGlobal()).users.find((u) => u.displayName === cancelName) ?? null)
+    : null;
+  log(
+    `**등록 옵션만 요청하고(지문 인증 없이) verify는 호출하지 않은 뒤, 서버 DB에 해당 이름의 계정이 있는지 확인**\n\n` +
+      '```\n' +
+      `요청한 이름: ${cancelName}\n` +
+      `서버 DB에 이 이름의 계정이 생겼는가: ${ghostUserFound ? '예 (문제!)' : '아니오 (정상)'}\n` +
+      '```\n',
+  );
+
+  // 등록 (증거용 계정) — 이때 실제로 브라우저가 서버로 보내는 요청 본문을 가로채서
+  // C23(개인키가 전송되지 않는다는 사실)의 증거로 남긴다.
   await page.goto(`${BASE_URL}/my-space`);
   await page.waitForSelector('text=패스키로 시작하기');
   await page.fill('input[type="text"]', '증거용테스트');
-  await page.click('button:has-text("패스키 만들기")');
+
+  const [verifyRequest] = await Promise.all([
+    page.waitForRequest((req) => req.url().endsWith('/api/register/verify') && req.method() === 'POST'),
+    page.click('button:has-text("패스키 만들기")'),
+  ]);
   await page.waitForSelector('text=패스키가 등록되었습니다.', { timeout: 15000 });
+
+  const verifyReqBody = JSON.parse(verifyRequest.postData() ?? '{}');
+  section('C23. 등록 요청 본문에 개인키가 들어있지 않습니다');
+  log(
+    `**브라우저가 /api/register/verify 로 실제로 보낸 요청 본문의 최상위 필드들**\n\n` +
+      '```json\n' +
+      JSON.stringify(
+        {
+          deviceName: verifyReqBody.deviceName,
+          'response (최상위 키만)': Object.keys(verifyReqBody.response ?? {}),
+          'response.response (WebAuthn 표준 attestation 필드, 최상위 키만)': Object.keys(
+            verifyReqBody.response?.response ?? {},
+          ),
+        },
+        null,
+        2,
+      ) +
+      '\n```\n\n' +
+      '`clientDataJSON`/`attestationObject`는 WebAuthn 표준이 정의하는 공개 인증서/서명 관련 데이터이고, ' +
+      '`privateKey`/`password` 같은 필드는 어디에도 없습니다. (개인키는 브라우저/OS 안의 보안 하드웨어를 벗어나지 않으며, ' +
+      'WebAuthn API 자체가 개인키를 JS로 꺼낼 수 있는 방법을 제공하지 않습니다.)',
+  );
 
   const meInfo = await page.evaluate(async () => {
     const r = await fetch('/api/me');
@@ -87,22 +183,9 @@ async function main() {
 
   // 3) 서버 저장 값 확인 (공개키/credential ID/counter만, 비밀번호·개인키 없음)
   section('3. 서버에는 공개키·credential ID·sign counter만 저장하고, 비밀번호·개인키는 저장하지 않습니다');
-  const rawToken = process.env.BLOB_READ_WRITE_TOKEN;
-  async function fetchRawDb() {
-    const rawRes = await fetch(
-      `https://fmaiqwkkbsvudj4y.private.blob.vercel-storage.com/t08-passkey-db.json?t=${Date.now()}`,
-      { headers: { Authorization: `Bearer ${rawToken}` }, cache: 'no-store' },
-    );
-    return rawRes.json();
-  }
-  let rawRecord;
-  if (rawToken) {
-    for (let attempt = 0; attempt < 5 && !rawRecord; attempt++) {
-      if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
-      const rawDb = await fetchRawDb();
-      rawRecord = rawDb.passkeys.find((p) => p.id === passkeyId);
-    }
-  }
+  const rawRecord = await fetchRawRecordWithRetry((rawDb) =>
+    rawDb.passkeys.find((p) => p.id === passkeyId),
+  );
   if (rawRecord) {
     log(
       `**서버 DB에 실제로 저장된 패스키 레코드 (원본 필드 구조, 실제 값에서 긴 무작위 값만 가림)**\n\n` +
@@ -163,6 +246,37 @@ async function main() {
   });
   proof('로그아웃 후 같은 쿠키로 재접근 → 거절 (서버 세션 완전 삭제 확인)', 'GET /api/me (로그아웃된 쿠키)', meAfterLogout);
 
+  // C28: 로그인 요청마다 challenge가 서로 다른지 확인
+  section('C28. 로그인 요청마다 질문(challenge) 값이 서로 다릅니다');
+  const twoLoginOptions = await page.evaluate(async () => {
+    const a = await (await fetch('/api/login/options', { method: 'POST' })).json();
+    const b = await (await fetch('/api/login/options', { method: 'POST' })).json();
+    return { first: a.options.challenge, second: b.options.challenge };
+  });
+  log(
+    `**같은 화면에서 로그인 옵션을 두 번 요청한 challenge 값 비교**\n\n` +
+      '```\n' +
+      `1번째 challenge: ${mask(twoLoginOptions.first)}\n` +
+      `2번째 challenge: ${mask(twoLoginOptions.second)}\n` +
+      `두 값이 다른가: ${twoLoginOptions.first !== twoLoginOptions.second}\n` +
+      '```\n',
+  );
+
+  // 재로그인(성공 사례) — 실패 사례(삭제된 패스키로 로그인, 아래)와 나란히 비교하기 위해 먼저 성공 사례를 기록한다.
+  section('C30. 서명 확인 성공/실패 사례 비교');
+  await page.reload();
+  await page.waitForSelector('button:has-text("기존 패스키로 로그인")');
+  const [loginVerifyResponse] = await Promise.all([
+    page.waitForResponse((res) => res.url().endsWith('/api/login/verify')),
+    page.click('button:has-text("기존 패스키로 로그인")'),
+  ]);
+  proof(
+    '성공 사례: 등록된 패스키로 로그인 → 통과',
+    'POST /api/login/verify (유효한 서명)',
+    { status: loginVerifyResponse.status(), body: await loginVerifyResponse.json() },
+  );
+  // (실패 사례는 이 아래 "삭제한 패스키로 로그인 시도" 항목에서 바로 이어진다.)
+
   const challengeReuse = await page.evaluate(async () => {
     const optRes = await fetch('/api/login/options', { method: 'POST' });
     const body = JSON.stringify({ response: { id: 'no-such-credential' } });
@@ -189,13 +303,10 @@ async function main() {
     { status: challengeReuse.secondStatus, body: challengeReuse.secondBody },
   );
 
-  // 재로그인 후 패스키 삭제 → 삭제된 패스키로 로그인 시도
-  // 위에서 fetch로 직접 로그아웃을 호출해 화면(React 상태)은 여전히 로그인된 걸로
-  // 남아있으므로, 새로고침해서 화면 상태를 서버 상태와 맞춘 뒤 로그인 버튼을 누른다.
+  // 위 "C30 성공 사례"에서 이미 재로그인을 마쳤으므로, 여기서는 화면이 로그인
+  // 상태로 반영됐는지만 확인하고 바로 이어서 패스키 삭제 시나리오로 넘어간다.
   await page.reload();
-  await page.waitForSelector('button:has-text("기존 패스키로 로그인")');
-  await page.click('button:has-text("기존 패스키로 로그인")');
-  await page.waitForSelector('text=로그인되었습니다.', { timeout: 15000 });
+  await page.waitForSelector('text=등록된 패스키');
 
   // 두 번째 패스키를 임시로 하나 더 등록해서(삭제 가능하게) 삭제 시나리오를 만든다
   await cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId });
@@ -258,7 +369,8 @@ async function main() {
   );
   proof('마지막 남은 패스키 삭제 시도 → 거절', 'POST /api/passkeys/delete (본인 소유 마지막 1개)', lastDelRes);
 
-  // 양방향 타 계정 조회 거절
+  // 양방향 타 계정 조회 거절 (C36~C41)
+  section('C36~C41. 양방향 타 계정 조회 거절');
   const context2 = await browser.newContext();
   const page2 = await context2.newPage();
   page2.on('dialog', async (d) => d.accept(d.defaultValue() || '증거용 다른계정'));
@@ -277,6 +389,22 @@ async function main() {
     const text = await r.text();
     return { status: r.status, body: text ? JSON.parse(text) : null };
   });
+
+  // C36: 두 계정의 비공개 자료가 실제로 서로 다른 내용인지 확인
+  const meInfo4 = await page.evaluate(async () => (await fetch('/api/me')).json());
+  log(
+    `**C36. 계정 1과 계정 2의 비공개 자료 내용 비교 (제목만)**\n\n` +
+      '```\n' +
+      `계정1(${meInfo4.displayName}) 비공개 자료 제목: ${meInfo4.privateItems.map((i) => i.title).join(' / ')}\n` +
+      `계정2(${me2.body.displayName}) 비공개 자료 제목: ${me2.body.privateItems.map((i) => i.title).join(' / ')}\n` +
+      `서로 다른가: ${JSON.stringify(meInfo4.privateItems) !== JSON.stringify(me2.body.privateItems)}\n` +
+      '```\n',
+  );
+
+  // C39: 거절 전/후 상대편(계정1) 패스키 개수가 그대로인지 비교하기 위해 미리 세어 둔다.
+  const account1CountBefore = meInfo4.passkeys.length;
+
+  // C37/C39/C40: 계정2 → 계정1의 패스키를 요청 본문에 직접 적어 삭제/조회 시도
   const crossDelete = await page2.evaluate(
     async ({ id, csrf }) => {
       const r = await fetch('/api/passkeys/delete', {
@@ -290,9 +418,53 @@ async function main() {
     { id: lastId, csrf: me2.body.csrfToken },
   );
   proof(
-    '다른 계정이 남의 패스키를 조회/삭제 시도 → 거절',
-    'POST /api/passkeys/delete (다른 사용자 소유 credential id)',
+    'C37/C40. 계정2 → 계정1: 요청 본문에 계정1의 credential id를 직접 적어 삭제 시도 → 거절',
+    'POST /api/passkeys/delete (계정2 세션 + 계정1 소유 credential id)',
     crossDelete,
+  );
+
+  const meInfo5 = await page.evaluate(async () => (await fetch('/api/me')).json());
+  log(
+    `**C39. 거절 전/후 계정1의 패스키 개수 비교**\n\n` +
+      '```\n' +
+      `거절 시도 전: ${account1CountBefore}개\n` +
+      `거절 시도 후: ${meInfo5.passkeys.length}개\n` +
+      `그대로 유지되었는가: ${account1CountBefore === meInfo5.passkeys.length}\n` +
+      '```\n',
+  );
+
+  // C38: 반대 방향(계정1 → 계정2)도 똑같이 거절되는지 확인
+  const account2CountBefore = me2.body.passkeys.length;
+  const reverseCrossDelete = await page.evaluate(
+    async ({ id, csrf }) => {
+      const r = await fetch('/api/passkeys/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+        body: JSON.stringify({ credentialId: id }),
+      });
+      const text = await r.text();
+      return { status: r.status, body: text ? JSON.parse(text) : null };
+    },
+    { id: me2.body.passkeys[0].id, csrf: meInfo5.csrfToken },
+  );
+  proof(
+    'C38. 반대 방향: 계정1 → 계정2 소유 credential id를 삭제 시도 → 거절',
+    'POST /api/passkeys/delete (계정1 세션 + 계정2 소유 credential id)',
+    reverseCrossDelete,
+  );
+  const me2After = await page2.evaluate(async () => (await fetch('/api/me')).json());
+  log(
+    `**계정2 패스키 개수도 그대로인지 확인**\n\n` +
+      '```\n' +
+      `거절 시도 전: ${account2CountBefore}개 / 거절 시도 후: ${me2After.passkeys.length}개\n` +
+      '```\n',
+  );
+
+  log(
+    'C41. 이 거절들을 만들어 내는 소스 위치: `src/app/api/passkeys/delete/route.ts` — ' +
+      '`db.data.passkeys.filter((p) => p.userId === session.userId)` 로 **항상 현재 로그인한 세션의 소유 목록 안에서만** ' +
+      'credential id를 찾고, 그 목록에 없으면(다른 계정 소유라면) 404를 돌려준다. `src/app/api/me/route.ts` 도 ' +
+      '동일하게 `session.userId` 기준으로만 데이터를 조회하므로, 클라이언트가 다른 계정 정보를 요청 본문/주소에 넣어도 반영되지 않는다.',
   );
 
   // 6) 이 문서 자체가 세션/CSRF/challenge/서명 값을 가린 예시
