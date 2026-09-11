@@ -30,6 +30,9 @@ export type ChallengeRecord = {
   id: string;
   type: 'register' | 'login';
   userId?: string;
+  // 신규(비로그인) 등록 시 계정 레코드는 등록이 실제로 성공할 때까지 만들지 않는다.
+  // 그 전까지는 이름만 challenge에 잠깐 들고 있는다.
+  pendingDisplayName?: string;
   challenge: string;
   createdAt: string;
 };

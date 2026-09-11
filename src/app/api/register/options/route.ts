@@ -14,6 +14,7 @@ export async function POST(req: NextRequest) {
 
   let userId: string;
   let userName: string;
+  let pendingDisplayName: string | undefined;
 
   if (session) {
     // 로그인한 상태 -> 같은 계정에 패스키를 "추가 등록"하는 경우
@@ -24,7 +25,10 @@ export async function POST(req: NextRequest) {
     userId = user.id;
     userName = user.displayName;
   } else {
-    // 로그인 전 -> 새 계정을 합성 이름으로 만드는 경우
+    // 로그인 전 -> 새 계정을 합성 이름으로 만드는 경우.
+    // 계정 레코드는 아직 만들지 않는다 — 사용자가 등록을 취소하면(지문/PIN 창에서
+    // 거부·시간초과) 서버에 아무 흔적도 남지 않아야 하기 때문에, 실제로 등록에
+    // 성공했을 때(register/verify)에만 users 테이블에 기록한다.
     const body = await req.json().catch(() => ({}));
     const displayName = typeof body.displayName === 'string' ? body.displayName.trim() : '';
     if (!displayName || displayName.length > 40) {
@@ -32,8 +36,7 @@ export async function POST(req: NextRequest) {
     }
     userId = nanoid(16);
     userName = displayName;
-    db.data.users.push({ id: userId, displayName, createdAt: new Date().toISOString() });
-    await db.write();
+    pendingDisplayName = displayName;
   }
 
   const existingCredentials = db.data.passkeys.filter((p) => p.userId === userId);
@@ -55,7 +58,12 @@ export async function POST(req: NextRequest) {
     },
   });
 
-  const challengeRecord = await createChallenge('register', options.challenge, userId);
+  const challengeRecord = await createChallenge(
+    'register',
+    options.challenge,
+    userId,
+    pendingDisplayName,
+  );
 
   const res = NextResponse.json({ options });
   setPendingAttemptCookie(res, challengeRecord.id);

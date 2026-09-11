@@ -7,12 +7,14 @@ export async function createChallenge(
   type: ChallengeRecord['type'],
   challenge: string,
   userId?: string,
+  pendingDisplayName?: string,
 ) {
   const db = await getDB();
   const record: ChallengeRecord = {
     id: nanoid(24),
     type,
     userId,
+    pendingDisplayName,
     challenge,
     createdAt: new Date().toISOString(),
   };

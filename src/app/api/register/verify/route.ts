@@ -50,6 +50,19 @@ export async function POST(req: NextRequest) {
 
   const db = await getDB();
   await db.read();
+
+  // 새 계정 등록(비로그인 상태로 시작한 흐름)이었다면, 검증에 실제로 성공한
+  // 지금에서야 계정을 만든다. 이미 로그인된 상태에서 패스키를 추가한 경우엔
+  // 계정이 이미 있으니 건너뛴다.
+  const userExists = db.data.users.some((u) => u.id === challengeRecord.userId);
+  if (!userExists) {
+    db.data.users.push({
+      id: challengeRecord.userId,
+      displayName: challengeRecord.pendingDisplayName ?? '이름 없음',
+      createdAt: new Date().toISOString(),
+    });
+  }
+
   db.data.passkeys.push({
     id: credential.id,
     userId: challengeRecord.userId,
